@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orbitalwatch"
+version = "0.1.0"
+description = "Satellite pass prediction and TLE management for analysts and hobbyists"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Jacob Hallburns", email = "jacob.hallburns02@gmail.com" }]
+keywords = ["satellite", "tle", "orbital", "sgp4", "astronomy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "sgp4>=2.22",
+    "requests>=2.31",
+    "numpy>=1.26",
+    "skyfield>=1.48",
+    "folium>=0.15",
+    "matplotlib>=3.8",
+    "cartopy>=0.23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "responses>=0.24",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/jacobhallburns/Orbital-Watch"
+Repository = "https://github.com/jacobhallburns/Orbital-Watch"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["orbitalwatch*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short -m 'not live'"
+markers = ["live: hits real CelesTrak endpoints — skipped by default, run with -m live"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true

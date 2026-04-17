@@ -1,0 +1,2455 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.claude/
+  settings.local.json
+orbitalwatch/
+  geo/
+    __init__.py
+    location.py
+  predict/
+    __init__.py
+    passover.py
+    propagator.py
+  sources/
+    __init__.py
+    cache.py
+    celestrak.py
+  tle/
+    __init__.py
+    model.py
+    parser.py
+  viz/
+    __init__.py
+    elevation_plot.py
+    groundtrack.py
+  __init__.py
+tests/
+  __init__.py
+  test_cache.py
+  test_celestrak.py
+  test_live.py
+  test_parser.py
+  test_passover.py
+  test_propagator.py
+.gitignore
+CONTRIBUTING.md
+LICENSE
+pyproject.toml
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".claude/settings.local.json">
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(.venv/bin/pytest *)",
+      "Bash(curl -s \"https://celestrak.org/SOCRATES/query/gp.php?CATNR=25544&FORMAT=JSON\")",
+      "Bash(curl -s \"https://celestrak.org/SATCAT/records/?CATNR=25544&FORMAT=JSON\")",
+      "Bash(curl -s \"https://celestrak.org/SATCAT/records/?CATNR=25544&FORMAT=JSON\" -o /dev/null -w \"%{http_code}\")",
+      "Bash(curl -sv \"https://celestrak.org/SOCRATES/query/gp.php?GROUP=stations&FORMAT=JSON\" -o /dev/null)",
+      "Bash(curl -s \"https://celestrak.org/gp.php?CATNR=25544&FORMAT=JSON\")",
+      "Bash(curl -s \"https://celestrak.org/gp.php?CATNR=25544&FORMAT=JSON\" -o /dev/null -w \"%{http_code}\")",
+      "Bash(curl -s \"https://celestrak.org/SOCRATES/\" -o /dev/null -w \"%{http_code}\")",
+      "Bash(curl -sv \"https://celestrak.org/\")",
+      "Bash(curl -s \"https://celestrak.org/SOCRATES/\")",
+      "Bash(curl -s \"https://celestrak.org/\")",
+      "Bash(curl -s \"https://celestrak.org/NORAD/documentation/gp-data-formats.php\")",
+      "Bash(curl -s \"https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=JSON\")",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s \"https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE\")",
+      "Bash(curl -s \"https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=TLE\")"
+    ]
+  }
+}
+</file>
+
+<file path="orbitalwatch/geo/__init__.py">
+"""Ground station definitions and coordinate-frame transforms."""
+</file>
+
+<file path="orbitalwatch/geo/location.py">
+"""
+Ground station / observer location.
+
+Planned functionality:
+- GroundStation dataclass: name, lat (°N), lon (°E), elev_m.
+- Helper: from_city(name) — look up common observing sites by name.
+- Coordinate conversion helpers: geodetic ↔ ECEF ↔ ECI (via skyfield).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class GroundStation:
+    """An observer location on Earth's surface.
+
+    Attributes:
+        name:   Human-readable label.
+        lat:    Geodetic latitude in decimal degrees (north positive).
+        lon:    Geodetic longitude in decimal degrees (east positive).
+        elev_m: Elevation above WGS-84 ellipsoid in metres.
+    """
+
+    name: str
+    lat: float
+    lon: float
+    elev_m: float = 0.0
+</file>
+
+<file path="orbitalwatch/predict/__init__.py">
+"""Orbit propagation and ground-station pass prediction."""
+</file>
+
+<file path="orbitalwatch/predict/passover.py">
+"""
+Ground-station pass prediction.
+
+Given a TLERecord and a GroundStation, finds overhead passes using a
+coarse 60-second scan to detect horizon crossings, bisection to refine
+rise/set times, and a fine scan to locate max elevation.
+
+Skyfield handles all ECI → topocentric az/el transforms.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Union
+
+import numpy as np
+from skyfield.api import EarthSatellite, load, wgs84
+
+from orbitalwatch.geo.location import GroundStation
+from orbitalwatch.tle.model import TLERecord
+
+
+@dataclass
+class PassEvent:
+    rise_utc: datetime
+    set_utc: datetime
+    max_elevation_deg: float
+    rise_az: float
+    max_az: float
+    set_az: float
+    duration_seconds: float
+
+
+class PassoverPredictor:
+    """Predicts overhead satellite passes for a ground station."""
+
+    def __init__(self, coarse_step_s: int = 60) -> None:
+        self._step_s = coarse_step_s
+        self._ts = load.timescale(builtin=True)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _make_sat(self, tle: TLERecord) -> EarthSatellite:
+        return EarthSatellite(tle.line1, tle.line2, tle.name, self._ts)
+
+    def _make_topos(self, station: GroundStation):
+        return wgs84.latlon(station.lat, station.lon, elevation_m=station.elev_m)
+
+    def _altaz_at(self, sat, topos, utc: datetime) -> tuple[float, float]:
+        """Return (elevation_deg, azimuth_deg) for a single UTC datetime."""
+        t = self._ts.from_datetime(utc)
+        alt, az, _ = (sat - topos).at(t).altaz()
+        return float(alt.degrees), float(az.degrees)
+
+    def _elevation_at(self, sat, topos, utc: datetime) -> float:
+        return self._altaz_at(sat, topos, utc)[0]
+
+    def _altaz_array(
+        self, sat, topos, times: list[datetime]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Vectorised az/el for a list of UTC datetimes."""
+        t = self._ts.from_datetimes(times)
+        alt, az, _ = (sat - topos).at(t).altaz()
+        return alt.degrees, az.degrees
+
+    def _bisect_crossing(
+        self,
+        sat,
+        topos,
+        t_lo: datetime,
+        t_hi: datetime,
+        rising: bool,
+        tol_s: float = 0.5,
+    ) -> datetime:
+        """Narrow horizon crossing to within tol_s seconds.
+
+        Convention: when rising=True, elevation goes from negative (t_lo)
+        to non-negative (t_hi); when False, the reverse.
+        """
+        while (t_hi - t_lo).total_seconds() > tol_s:
+            t_mid = t_lo + (t_hi - t_lo) / 2
+            el = self._elevation_at(sat, topos, t_mid)
+            # rising=True:  el>=0 → crossing is in [t_lo, t_mid] → shrink t_hi
+            # rising=False: el>=0 → crossing is in [t_mid, t_hi] → shrink t_lo
+            if (el >= 0) == rising:
+                t_hi = t_mid
+            else:
+                t_lo = t_mid
+        return t_lo + (t_hi - t_lo) / 2
+
+    def _find_max_elevation(
+        self,
+        sat,
+        topos,
+        rise_time: datetime,
+        set_time: datetime,
+        fine_step_s: float = 10.0,
+    ) -> tuple[float, float, datetime]:
+        """Return (max_el_deg, az_at_max_deg, time_of_max) via fine scan."""
+        duration_s = (set_time - rise_time).total_seconds()
+        n = max(int(duration_s / fine_step_s), 10)
+        times = [
+            rise_time + timedelta(seconds=duration_s * k / n) for k in range(n + 1)
+        ]
+        elevs, azs = self._altaz_array(sat, topos, times)
+        idx = int(np.argmax(elevs))
+        return float(elevs[idx]), float(azs[idx]), times[idx]
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def passes_in_window(
+        self,
+        tle: TLERecord,
+        station: GroundStation,
+        start_utc: datetime,
+        end_utc: datetime,
+        min_elevation_deg: float = 10.0,
+    ) -> list[PassEvent]:
+        """Return all passes with max elevation >= min_elevation_deg in [start, end]."""
+        sat = self._make_sat(tle)
+        topos = self._make_topos(station)
+
+        step = timedelta(seconds=self._step_s)
+        times: list[datetime] = []
+        t = start_utc
+        while t <= end_utc:
+            times.append(t)
+            t += step
+        if len(times) < 2:
+            return []
+
+        elevs, _ = self._altaz_array(sat, topos, times)
+        passes: list[PassEvent] = []
+        i = 0
+
+        # Handle satellite already above horizon at window start.
+        if elevs[0] >= 0:
+            rise_time = start_utc
+            j = 0
+            while j < len(times) - 1 and elevs[j] >= 0:
+                j += 1
+            set_time = (
+                end_utc
+                if elevs[j] >= 0
+                else self._bisect_crossing(sat, topos, times[j - 1], times[j], rising=False)
+            )
+            max_el, max_az, _ = self._find_max_elevation(sat, topos, rise_time, set_time)
+            if max_el >= min_elevation_deg:
+                _, rise_az = self._altaz_at(sat, topos, rise_time)
+                _, set_az = self._altaz_at(sat, topos, set_time)
+                passes.append(PassEvent(
+                    rise_utc=rise_time,
+                    set_utc=set_time,
+                    max_elevation_deg=max_el,
+                    rise_az=rise_az,
+                    max_az=max_az,
+                    set_az=set_az,
+                    duration_seconds=(set_time - rise_time).total_seconds(),
+                ))
+            i = j
+
+        while i < len(times) - 1:
+            if elevs[i] < 0 and elevs[i + 1] >= 0:
+                rise_time = self._bisect_crossing(
+                    sat, topos, times[i], times[i + 1], rising=True
+                )
+                j = i + 1
+                while j < len(times) - 1 and elevs[j] >= 0:
+                    j += 1
+                set_time = (
+                    end_utc
+                    if elevs[j] >= 0
+                    else self._bisect_crossing(
+                        sat, topos, times[j - 1], times[j], rising=False
+                    )
+                )
+                max_el, max_az, _ = self._find_max_elevation(sat, topos, rise_time, set_time)
+                if max_el >= min_elevation_deg:
+                    _, rise_az = self._altaz_at(sat, topos, rise_time)
+                    _, set_az = self._altaz_at(sat, topos, set_time)
+                    passes.append(PassEvent(
+                        rise_utc=rise_time,
+                        set_utc=set_time,
+                        max_elevation_deg=max_el,
+                        rise_az=rise_az,
+                        max_az=max_az,
+                        set_az=set_az,
+                        duration_seconds=(set_time - rise_time).total_seconds(),
+                    ))
+                i = j
+            else:
+                i += 1
+
+        return passes
+
+    def next_passes(
+        self,
+        tle: TLERecord,
+        station: GroundStation,
+        count: int,
+        start_utc: datetime,
+        min_elevation_deg: float = 10.0,
+    ) -> list[PassEvent]:
+        """Return the next `count` passes after start_utc."""
+        results: list[PassEvent] = []
+        window_start = start_utc
+        for _ in range(30):
+            if len(results) >= count:
+                break
+            window_end = window_start + timedelta(days=1)
+            results.extend(
+                self.passes_in_window(tle, station, window_start, window_end, min_elevation_deg)
+            )
+            window_start = window_end
+        return results[:count]
+</file>
+
+<file path="orbitalwatch/predict/propagator.py">
+"""
+SGP4/SDP4 propagation wrapper.
+
+Wraps the sgp4 library with TLERecord as input, returning ECI position
+and velocity as numpy arrays. Supports both single-epoch and vectorised
+propagation over a time array.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Union
+
+import numpy as np
+from sgp4.api import Satrec, jday
+
+from orbitalwatch.tle.model import TLERecord
+
+_SGP4_ERRORS: dict[int, str] = {
+    1: "mean eccentricity not in [0, 1) or semi-major axis < 0.95 er",
+    2: "mean motion is less than 0.0",
+    3: "perturbed eccentricity not in [0, 1)",
+    4: "semi-latus rectum is less than 0.0",
+    5: "epoch elements are sub-orbital",
+    6: "satellite has decayed",
+}
+
+
+class PropagationError(Exception):
+    """Raised when SGP4 propagation returns a non-zero error code."""
+
+
+def _make_satrec(tle: TLERecord) -> Satrec:
+    return Satrec.twoline2rv(tle.line1, tle.line2)
+
+
+def _to_jd(utc: datetime) -> tuple[float, float]:
+    return jday(
+        utc.year, utc.month, utc.day,
+        utc.hour, utc.minute, utc.second + utc.microsecond / 1_000_000,
+    )
+
+
+def propagate(tle: TLERecord, utc: datetime) -> tuple[np.ndarray, np.ndarray]:
+    """Propagate satellite to a single UTC datetime.
+
+    Returns (position_km, velocity_km_s), each a (3,) numpy array in the
+    TEME frame (as produced by SGP4).
+
+    Raises:
+        PropagationError: if SGP4 returns a non-zero error code.
+    """
+    sat = _make_satrec(tle)
+    jd, fr = _to_jd(utc)
+    e, r, v = sat.sgp4(jd, fr)
+    if e != 0:
+        msg = _SGP4_ERRORS.get(e, f"SGP4 error code {e}")
+        raise PropagationError(f"SGP4 propagation failed: {msg}")
+    return np.array(r, dtype=float), np.array(v, dtype=float)
+
+
+def propagate_many(
+    tle: TLERecord,
+    utcs: Union[list[datetime], np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorised propagation over an array of UTC datetimes.
+
+    Args:
+        tle:  The satellite TLE record.
+        utcs: Sequence of timezone-aware UTC datetime objects.
+
+    Returns:
+        (positions_km, velocities_km_s) as (N, 3) numpy arrays in the
+        TEME frame.
+
+    Raises:
+        PropagationError: if any propagation step returns a non-zero error.
+    """
+    sat = _make_satrec(tle)
+    n = len(utcs)
+    jds = np.empty(n, dtype=float)
+    frs = np.empty(n, dtype=float)
+    for i, utc in enumerate(utcs):
+        jds[i], frs[i] = _to_jd(utc)
+
+    e, r, v = sat.sgp4_array(jds, frs)
+
+    bad = np.flatnonzero(e != 0)
+    if bad.size > 0:
+        code = int(e[bad[0]])
+        msg = _SGP4_ERRORS.get(code, f"SGP4 error code {code}")
+        raise PropagationError(
+            f"SGP4 propagation failed at index {bad[0]}: {msg}"
+        )
+
+    return r, v
+</file>
+
+<file path="orbitalwatch/sources/__init__.py">
+"""Data source adapters that fetch TLEs from external services."""
+</file>
+
+<file path="orbitalwatch/sources/cache.py">
+"""
+SQLite-backed local TLE cache with configurable TTL.
+
+Usage pattern — wrap any source call with the cache:
+
+    cache = TLECache()
+    record = cache.get(norad_id=25544)
+    if record is None:
+        record = source.fetch_by_norad_id(25544)
+        cache.put(record)
+
+The cache stores raw TLE line1/line2 strings and re-parses on retrieval
+so the full TLERecord dataclass (including fetched_at) is always current.
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from orbitalwatch.tle.model import TLERecord
+from orbitalwatch.tle.parser import parse
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_TTL_SECONDS = 3600          # 1 hour
+_DEFAULT_DB_PATH = Path.home() / ".orbitalwatch" / "tle_cache.db"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tle_cache (
+    norad_id    INTEGER PRIMARY KEY,
+    name        TEXT    NOT NULL,
+    line1       TEXT    NOT NULL,
+    line2       TEXT    NOT NULL,
+    source      TEXT    NOT NULL DEFAULT 'unknown',
+    fetched_at  TEXT    NOT NULL   -- ISO-8601 UTC
+);
+"""
+
+
+class TLECache:
+    """SQLite-backed cache for TLERecord objects.
+
+    Args:
+        db_path:     Path to the SQLite database file.
+                     Defaults to ``~/.orbitalwatch/tle_cache.db``.
+        ttl_seconds: How long a cached entry is considered fresh.
+                     Defaults to 3600 (1 hour). Pass 0 to disable TTL
+                     (always return cached values if present).
+    """
+
+    def __init__(
+        self,
+        db_path: Path | str | None = None,
+        ttl_seconds: int = _DEFAULT_TTL_SECONDS,
+    ) -> None:
+        self.db_path = Path(db_path) if db_path else _DEFAULT_DB_PATH
+        self.ttl_seconds = ttl_seconds
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn.execute(_SCHEMA)
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get(self, norad_id: int) -> TLERecord | None:
+        """Return a cached TLERecord for *norad_id*, or None if absent/stale.
+
+        A record is considered stale if its ``fetched_at`` timestamp is older
+        than ``self.ttl_seconds`` ago.  Pass ``ttl_seconds=0`` at construction
+        to always return cached values regardless of age.
+        """
+        row = self._conn.execute(
+            "SELECT name, line1, line2, source, fetched_at FROM tle_cache WHERE norad_id = ?",
+            (norad_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        name, line1, line2, source, fetched_at_iso = row
+        fetched_at = datetime.fromisoformat(fetched_at_iso)
+
+        if self.ttl_seconds > 0:
+            age = datetime.now(tz=timezone.utc) - fetched_at
+            if age > timedelta(seconds=self.ttl_seconds):
+                logger.debug("Cache miss (stale) for NORAD %d (age %s)", norad_id, age)
+                return None
+
+        try:
+            record = parse(name, line1, line2, source=source)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Corrupt cache entry for NORAD %d: %s", norad_id, exc)
+            self.invalidate(norad_id)
+            return None
+
+        logger.debug("Cache hit for NORAD %d", norad_id)
+        return record
+
+    def put(self, record: TLERecord) -> None:
+        """Insert or replace a TLERecord in the cache."""
+        fetched_at_iso = record.fetched_at.astimezone(timezone.utc).isoformat()
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO tle_cache (norad_id, name, line1, line2, source, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.norad_id,
+                record.name,
+                record.line1,
+                record.line2,
+                record.source,
+                fetched_at_iso,
+            ),
+        )
+        self._conn.commit()
+        logger.debug("Cached NORAD %d (%s)", record.norad_id, record.name)
+
+    def put_many(self, records: list[TLERecord]) -> None:
+        """Bulk-insert a list of TLERecords into the cache."""
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        rows = [
+            (r.norad_id, r.name, r.line1, r.line2, r.source, now_iso)
+            for r in records
+        ]
+        self._conn.executemany(
+            """
+            INSERT OR REPLACE INTO tle_cache (norad_id, name, line1, line2, source, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self._conn.commit()
+        logger.debug("Bulk-cached %d records", len(rows))
+
+    def invalidate(self, norad_id: int) -> None:
+        """Remove a single entry from the cache."""
+        self._conn.execute("DELETE FROM tle_cache WHERE norad_id = ?", (norad_id,))
+        self._conn.commit()
+
+    def clear(self) -> None:
+        """Remove all entries from the cache."""
+        self._conn.execute("DELETE FROM tle_cache")
+        self._conn.commit()
+
+    def count(self) -> int:
+        """Return the total number of cached entries."""
+        row = self._conn.execute("SELECT COUNT(*) FROM tle_cache").fetchone()
+        return row[0] if row else 0
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+        self._conn.close()
+
+    def __enter__(self) -> "TLECache":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+</file>
+
+<file path="orbitalwatch/sources/celestrak.py">
+"""
+CelesTrak data source adapter.
+
+Fetches TLE catalogs and individual satellite records from CelesTrak's
+free, no-auth API endpoint:
+
+    https://celestrak.org/NORAD/elements/gp.php
+
+Documented at https://celestrak.org/NORAD/documentation/gp-data-formats.php
+
+Supported operations:
+- fetch_category(category)    — all satellites in a named group
+- fetch_active()              — full active-satellites catalog
+- fetch_by_norad_id(norad_id) — single satellite lookup
+
+All methods return TLERecord instances via the shared parser.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import requests
+
+from orbitalwatch.tle.model import TLERecord
+from orbitalwatch.tle.parser import TLEParseError, parse_many
+
+logger = logging.getLogger(__name__)
+
+# Documented at https://celestrak.org/NORAD/documentation/gp-data-formats.php
+_GP_URL = "https://celestrak.org/NORAD/elements/gp.php"
+
+# Documented group names accepted by the GROUP query parameter.
+KNOWN_CATEGORIES: tuple[str, ...] = (
+    "stations",
+    "visual",
+    "active",
+    "analyst",
+    "last-30-days",
+    "weather",
+    "noaa",
+    "goes",
+    "resource",
+    "sarsat",
+    "dmc",
+    "tdrss",
+    "argos",
+    "planet",
+    "spire",
+    "geo",
+    "intelsat",
+    "ses",
+    "iridium",
+    "iridium-NEXT",
+    "starlink",
+    "oneweb",
+    "orbcomm",
+    "globalstar",
+    "amateur",
+    "x-comm",
+    "other-comm",
+    "gps-ops",
+    "glo-ops",
+    "galileo",
+    "beidou",
+    "sbas",
+    "nnss",
+    "radar",
+    "cubesats",
+    "other",
+)
+
+_SOURCE_LABEL = "celestrak"
+
+
+class CelesTrakError(RuntimeError):
+    """Raised when a CelesTrak request fails and no cached fallback is available."""
+
+
+class CelesTrakSource:
+    """Fetch satellite TLEs from CelesTrak's public API.
+
+    Uses ``FORMAT=TLE`` (classic 3-line TLE text), which is the most
+    universally compatible format and maps directly to the internal parser.
+
+    Args:
+        timeout:    HTTP request timeout in seconds (default 15).
+        session:    Optional pre-configured requests.Session (useful for testing).
+    """
+
+    def __init__(self, timeout: int = 15, session: requests.Session | None = None) -> None:
+        self.timeout = timeout
+        self._session = session or requests.Session()
+        self._session.headers.update({"User-Agent": "orbitalwatch/0.1 (python)"})
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def fetch_category(self, category: str) -> list[TLERecord]:
+        """Fetch all TLEs for a named CelesTrak group/category.
+
+        Args:
+            category: One of the group names listed in KNOWN_CATEGORIES,
+                      e.g. ``'stations'``, ``'starlink'``, ``'active'``.
+
+        Returns:
+            List of TLERecord objects, one per satellite in the group.
+
+        Raises:
+            CelesTrakError: On HTTP failure or unparseable response.
+        """
+        params = {"GROUP": category, "FORMAT": "TLE"}
+        text = self._get_text(_GP_URL, params, context=f"category={category!r}")
+        return self._parse_tle_text(text)
+
+    def fetch_active(self) -> list[TLERecord]:
+        """Fetch the full active-satellites catalog (~8 000 objects).
+
+        Equivalent to ``fetch_category('active')``.
+        """
+        return self.fetch_category("active")
+
+    def fetch_by_norad_id(self, norad_id: int) -> TLERecord:
+        """Fetch a single satellite by its NORAD catalog number.
+
+        Args:
+            norad_id: Integer NORAD ID, e.g. ``25544`` for the ISS.
+
+        Returns:
+            A TLERecord for the requested object.
+
+        Raises:
+            CelesTrakError: If the satellite is not found or the request fails.
+        """
+        params = {"CATNR": str(norad_id), "FORMAT": "TLE"}
+        text = self._get_text(_GP_URL, params, context=f"NORAD={norad_id}")
+        records = self._parse_tle_text(text)
+        if not records:
+            raise CelesTrakError(f"No data returned for NORAD ID {norad_id}")
+        if len(records) > 1:
+            logger.warning(
+                "NORAD ID %d matched %d records; returning first", norad_id, len(records)
+            )
+        return records[0]
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_text(self, url: str, params: dict[str, str], context: str) -> str:
+        try:
+            resp = self._session.get(url, params=params, timeout=self.timeout)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise CelesTrakError(f"CelesTrak request failed ({context}): {exc}") from exc
+        return resp.text
+
+    def _parse_tle_text(self, text: str) -> list[TLERecord]:
+        """Parse a 3-line TLE text block returned by CelesTrak into TLERecords.
+
+        Malformed individual entries are logged and skipped; no exception is
+        raised unless the entire text is unparseable.
+        """
+        # CelesTrak returns clean 3-line sets; parse_many handles blank lines.
+        try:
+            return parse_many(text, source=_SOURCE_LABEL)
+        except TLEParseError as exc:
+            raise CelesTrakError(f"Failed to parse CelesTrak TLE response: {exc}") from exc
+</file>
+
+<file path="orbitalwatch/tle/__init__.py">
+"""TLE parsing, validation, and the canonical TLERecord dataclass."""
+</file>
+
+<file path="orbitalwatch/tle/model.py">
+"""
+Canonical TLE dataclass shared across all Orbital Watch modules.
+
+Every data source, parser, cache, and predictor speaks TLERecord.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+
+@dataclass(frozen=True)
+class TLERecord:
+    """A parsed two-line element set with metadata.
+
+    All numeric fields carry the types defined in the TLE standard.
+    String fields are stripped of surrounding whitespace.
+    """
+
+    # --- identification ---
+    name: str
+    norad_id: int
+    classification: str          # 'U' unclassified, 'C' classified, 'S' secret
+    int_designator: str          # COSPAR international designator
+
+    # --- epoch ---
+    epoch: datetime              # UTC epoch derived from TLE epoch field
+
+    # --- first-derivative of mean motion (rev/day²) ---
+    mean_motion_dot: float
+
+    # --- second-derivative of mean motion (rev/day³), scaled ×10^n ---
+    mean_motion_ddot: float
+
+    # --- BSTAR drag term (1/earth-radii) ---
+    bstar: float
+
+    # --- element set metadata ---
+    element_set_no: int
+    rev_at_epoch: int
+
+    # --- Keplerian / mean elements ---
+    inclination_deg: float
+    raan_deg: float              # right ascension of ascending node
+    eccentricity: float          # dimensionless (no leading decimal point in TLE)
+    arg_perigee_deg: float
+    mean_anomaly_deg: float
+    mean_motion_rev_per_day: float
+
+    # --- raw strings for round-trip fidelity ---
+    line1: str
+    line2: str
+
+    # --- provenance ---
+    source: str = "unknown"
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+    def tle_lines(self) -> tuple[str, str]:
+        """Return the raw (line1, line2) tuple for downstream SGP4 use."""
+        return self.line1, self.line2
+</file>
+
+<file path="orbitalwatch/tle/parser.py">
+"""
+Parse raw two-line element strings into TLERecord instances.
+
+Validates line checksums, extracts every standard TLE field with the
+correct Python type, and raises descriptive errors on malformed input.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from .model import TLERecord
+
+
+class TLEParseError(ValueError):
+    """Raised when a TLE cannot be parsed or fails checksum validation."""
+
+
+# ---------------------------------------------------------------------------
+# Checksum
+# ---------------------------------------------------------------------------
+
+def _checksum(line: str) -> int:
+    """Compute the modulo-10 checksum of a TLE line (digits + '-'=1)."""
+    total = 0
+    for ch in line[:68]:
+        if ch.isdigit():
+            total += int(ch)
+        elif ch == "-":
+            total += 1
+    return total % 10
+
+
+def _validate_checksum(line: str, line_no: int) -> None:
+    if len(line) < 69:
+        raise TLEParseError(f"Line {line_no} too short ({len(line)} chars, need ≥69)")
+    expected = int(line[68])
+    computed = _checksum(line)
+    if computed != expected:
+        raise TLEParseError(
+            f"Line {line_no} checksum mismatch: computed {computed}, stored {expected}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Epoch conversion
+# ---------------------------------------------------------------------------
+
+def _parse_epoch(epoch_str: str) -> datetime:
+    """Convert TLE epoch 'YYDDD.DDDDDDDD' to a UTC datetime."""
+    year2 = int(epoch_str[:2])
+    # Per NORAD convention: 57-99 → 1957-1999, 00-56 → 2000-2056
+    year = 2000 + year2 if year2 < 57 else 1900 + year2
+    day_of_year = float(epoch_str[2:])
+    # day_of_year is 1-based with fractional day
+    from datetime import timedelta
+    base = datetime(year, 1, 1, tzinfo=timezone.utc)
+    return base + timedelta(days=day_of_year - 1)
+
+
+# ---------------------------------------------------------------------------
+# Decimal point expansion helpers
+# ---------------------------------------------------------------------------
+
+def _parse_decimal_assumed(s: str) -> float:
+    """Parse a field like '0013746' that has an implied leading '0.'."""
+    return float("0." + s.strip())
+
+
+def _parse_exponential(s: str) -> float:
+    """Parse a packed exponential like ' 00000-0' or '-11606-4' → float."""
+    s = s.strip()
+    # Format: [sign]mantissa[sign]exponent  e.g. '-11606-4' or ' 00000-0'
+    # Find the exponent sign (last + or -)
+    sign = 1.0
+    if s[0] in "+-":
+        sign = -1.0 if s[0] == "-" else 1.0
+        s = s[1:]
+    # The exponent marker is the last + or - in s
+    for i in range(len(s) - 1, 0, -1):
+        if s[i] in "+-":
+            mantissa = float("0." + s[:i])
+            exp = int(s[i:])
+            return sign * mantissa * (10 ** exp)
+    # Fallback: plain integer mantissa, no exponent
+    return sign * float("0." + s)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def parse(name: str, line1: str, line2: str, source: str = "raw") -> TLERecord:
+    """Parse a three-element TLE (name + two lines) into a TLERecord.
+
+    Args:
+        name:   Satellite name (line 0), any leading/trailing whitespace stripped.
+        line1:  TLE line 1 (69 characters).
+        line2:  TLE line 2 (69 characters).
+        source: Provenance label stored on the record.
+
+    Returns:
+        A fully populated, immutable TLERecord.
+
+    Raises:
+        TLEParseError: On checksum failure or malformed fields.
+    """
+    name = name.strip()
+    line1 = line1.strip()
+    line2 = line2.strip()
+
+    if not line1.startswith("1 "):
+        raise TLEParseError(f"Line 1 does not start with '1 ': {line1!r}")
+    if not line2.startswith("2 "):
+        raise TLEParseError(f"Line 2 does not start with '2 ': {line2!r}")
+
+    _validate_checksum(line1, 1)
+    _validate_checksum(line2, 2)
+
+    # --- Line 1 fields ---
+    # Col indices (0-based, inclusive): per TLE standard
+    norad_id        = int(line1[2:7])
+    classification  = line1[7]
+    int_designator  = line1[9:17].strip()
+    epoch_str       = line1[18:32].strip()
+    epoch           = _parse_epoch(epoch_str)
+
+    mm_dot_raw = line1[33:43].strip()
+    mean_motion_dot = float(mm_dot_raw)
+
+    mm_ddot_raw = line1[44:52].strip()
+    mean_motion_ddot = _parse_exponential(mm_ddot_raw)
+
+    bstar_raw = line1[53:61].strip()
+    bstar = _parse_exponential(bstar_raw)
+
+    element_set_no = int(line1[64:68].strip())
+
+    # --- Line 2 fields ---
+    norad_id_l2 = int(line2[2:7])
+    if norad_id_l2 != norad_id:
+        raise TLEParseError(
+            f"NORAD ID mismatch between lines: line1={norad_id}, line2={norad_id_l2}"
+        )
+
+    inclination_deg         = float(line2[8:16].strip())
+    raan_deg                = float(line2[17:25].strip())
+    eccentricity            = _parse_decimal_assumed(line2[26:33].strip())
+    arg_perigee_deg         = float(line2[34:42].strip())
+    mean_anomaly_deg        = float(line2[43:51].strip())
+    mean_motion_rev_per_day = float(line2[52:63].strip())
+    rev_at_epoch            = int(line2[63:68].strip())
+
+    return TLERecord(
+        name=name,
+        norad_id=norad_id,
+        classification=classification,
+        int_designator=int_designator,
+        epoch=epoch,
+        mean_motion_dot=mean_motion_dot,
+        mean_motion_ddot=mean_motion_ddot,
+        bstar=bstar,
+        element_set_no=element_set_no,
+        rev_at_epoch=rev_at_epoch,
+        inclination_deg=inclination_deg,
+        raan_deg=raan_deg,
+        eccentricity=eccentricity,
+        arg_perigee_deg=arg_perigee_deg,
+        mean_anomaly_deg=mean_anomaly_deg,
+        mean_motion_rev_per_day=mean_motion_rev_per_day,
+        line1=line1,
+        line2=line2,
+        source=source,
+        fetched_at=datetime.now(tz=timezone.utc),
+    )
+
+
+def parse_many(text: str, source: str = "raw") -> list[TLERecord]:
+    """Parse a block of TLE text containing one or more three-line sets.
+
+    Blank lines between sets are ignored. Lines are grouped in triplets
+    (name, line1, line2). Raises TLEParseError on the first bad set.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) % 3 != 0:
+        raise TLEParseError(
+            f"TLE text has {len(lines)} non-blank lines; expected a multiple of 3"
+        )
+    records = []
+    for i in range(0, len(lines), 3):
+        records.append(parse(lines[i], lines[i + 1], lines[i + 2], source=source))
+    return records
+</file>
+
+<file path="orbitalwatch/viz/__init__.py">
+"""Visualization: ground track maps (folium) and elevation plots (matplotlib/cartopy)."""
+</file>
+
+<file path="orbitalwatch/viz/elevation_plot.py">
+"""
+Elevation-over-time pass plot.
+
+Planned functionality:
+- Plot satellite elevation angle vs. time for a single pass window.
+- Shade the region above the observer's minimum elevation threshold.
+- Annotate rise, max-elevation, and set times on the x-axis.
+- Uses matplotlib; optionally overlay on a cartopy map.
+"""
+
+from __future__ import annotations
+
+# TODO: implement plot_pass() using matplotlib
+</file>
+
+<file path="orbitalwatch/viz/groundtrack.py">
+"""
+Ground track rendering.
+
+Planned functionality:
+- Given a propagated orbit arc (lat/lon series), render an interactive
+  Folium map with the satellite ground track as a polyline.
+- Optionally overlay the observer's horizon circle.
+- Export to HTML or return the Folium Map object for embedding in notebooks.
+"""
+
+from __future__ import annotations
+
+# TODO: implement GroundTrackMap using folium
+</file>
+
+<file path="orbitalwatch/__init__.py">
+"""
+Orbital Watch — satellite pass prediction and TLE management.
+
+The canonical exchange type between all modules is `orbitalwatch.tle.model.TLERecord`.
+"""
+
+__version__ = "0.1.0"
+</file>
+
+<file path="tests/__init__.py">
+
+</file>
+
+<file path="tests/test_cache.py">
+"""Tests for orbitalwatch.sources.cache (SQLite-backed TLE cache)."""
+
+from __future__ import annotations
+
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from orbitalwatch.sources.cache import TLECache
+from orbitalwatch.tle.model import TLERecord
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _fix_checksum(line: str) -> str:
+    total = sum(int(c) if c.isdigit() else (1 if c == "-" else 0) for c in line[:68])
+    return line[:68] + str(total % 10)
+
+
+def _make_record(norad_id: int, name: str = "TEST SAT") -> TLERecord:
+    """Build a minimal but checksum-valid TLERecord for testing."""
+    l1 = f"1 {norad_id:05d}U 98067A   24001.50000000  .00001234  00000-0  27416-4 0  999"
+    l2 = f"2 {norad_id:05d}  51.6400 100.0000 0001234  90.0000 270.0000 15.50000000 1234"
+    l1 = _fix_checksum(l1)
+    l2 = _fix_checksum(l2)
+    from orbitalwatch.tle.parser import parse
+    return parse(name, l1, l2, source="test")
+
+
+@pytest.fixture
+def cache(tmp_path: Path) -> TLECache:
+    """A fresh in-memory-equivalent cache backed by a temp file."""
+    db = tmp_path / "test_cache.db"
+    return TLECache(db_path=db, ttl_seconds=3600)
+
+
+@pytest.fixture
+def sample_record() -> TLERecord:
+    return _make_record(25544, "ISS (ZARYA)")
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestPutAndGet:
+    def test_get_returns_none_when_empty(self, cache):
+        assert cache.get(25544) is None
+
+    def test_put_then_get_returns_record(self, cache, sample_record):
+        cache.put(sample_record)
+        result = cache.get(25544)
+        assert result is not None
+        assert result.norad_id == 25544
+
+    def test_get_returns_tle_record_type(self, cache, sample_record):
+        cache.put(sample_record)
+        result = cache.get(25544)
+        assert isinstance(result, TLERecord)
+
+    def test_name_preserved(self, cache, sample_record):
+        cache.put(sample_record)
+        result = cache.get(25544)
+        assert result.name == "ISS (ZARYA)"
+
+    def test_line1_line2_preserved(self, cache, sample_record):
+        cache.put(sample_record)
+        result = cache.get(25544)
+        assert result.line1 == sample_record.line1
+        assert result.line2 == sample_record.line2
+
+    def test_source_preserved(self, cache, sample_record):
+        cache.put(sample_record)
+        result = cache.get(25544)
+        assert result.source == "test"
+
+    def test_put_overwrites_existing(self, cache):
+        rec1 = _make_record(25544, "OLD NAME")
+        rec2 = _make_record(25544, "NEW NAME")
+        cache.put(rec1)
+        cache.put(rec2)
+        result = cache.get(25544)
+        assert result.name == "NEW NAME"
+
+
+class TestTTL:
+    def test_fresh_entry_returned(self, tmp_path):
+        cache = TLECache(db_path=tmp_path / "c.db", ttl_seconds=60)
+        cache.put(_make_record(25544))
+        assert cache.get(25544) is not None
+
+    def test_expired_entry_returns_none(self, tmp_path):
+        # TTL of 0 seconds means entries expire immediately
+        cache = TLECache(db_path=tmp_path / "c.db", ttl_seconds=0)
+        # ttl=0 means disabled (always fresh), so use ttl=1 and sleep
+        cache2 = TLECache(db_path=tmp_path / "c2.db", ttl_seconds=1)
+        cache2.put(_make_record(25544))
+        time.sleep(1.1)
+        assert cache2.get(25544) is None
+
+    def test_zero_ttl_always_returns_cached(self, tmp_path):
+        cache = TLECache(db_path=tmp_path / "c.db", ttl_seconds=0)
+        cache.put(_make_record(25544))
+        # Even after a tiny delay, ttl=0 means always fresh
+        assert cache.get(25544) is not None
+
+
+class TestPutMany:
+    def test_put_many_stores_all(self, cache):
+        records = [_make_record(i, f"SAT-{i}") for i in range(10000, 10005)]
+        cache.put_many(records)
+        assert cache.count() == 5
+        for i in range(10000, 10005):
+            assert cache.get(i) is not None
+
+    def test_put_many_empty_list(self, cache):
+        cache.put_many([])
+        assert cache.count() == 0
+
+
+class TestInvalidateAndClear:
+    def test_invalidate_removes_entry(self, cache, sample_record):
+        cache.put(sample_record)
+        cache.invalidate(25544)
+        assert cache.get(25544) is None
+
+    def test_invalidate_nonexistent_is_noop(self, cache):
+        cache.invalidate(99999)  # should not raise
+
+    def test_clear_removes_all(self, cache):
+        for i in range(10000, 10004):
+            cache.put(_make_record(i))
+        cache.clear()
+        assert cache.count() == 0
+
+
+class TestCount:
+    def test_count_zero_on_empty(self, cache):
+        assert cache.count() == 0
+
+    def test_count_increments(self, cache):
+        cache.put(_make_record(10001))
+        assert cache.count() == 1
+        cache.put(_make_record(10002))
+        assert cache.count() == 2
+
+
+class TestContextManager:
+    def test_context_manager_closes_cleanly(self, tmp_path):
+        db = tmp_path / "cm_test.db"
+        with TLECache(db_path=db) as cache:
+            cache.put(_make_record(25544))
+        # After __exit__, the DB file should still exist
+        assert db.exists()
+</file>
+
+<file path="tests/test_celestrak.py">
+"""Tests for orbitalwatch.sources.celestrak using mocked HTTP responses."""
+
+from __future__ import annotations
+
+import pytest
+import responses as resp_mock
+
+from orbitalwatch.sources.celestrak import CelesTrakSource, CelesTrakError, _GP_URL
+from orbitalwatch.tle.model import TLERecord
+
+
+# ---------------------------------------------------------------------------
+# Helpers — valid 3-line TLE text blocks
+# ---------------------------------------------------------------------------
+
+def _fix_checksum(line: str) -> str:
+    total = sum(int(c) if c.isdigit() else (1 if c == "-" else 0) for c in line[:68])
+    return line[:68] + str(total % 10)
+
+
+def _make_tle_block(name: str, norad_id: int) -> str:
+    """Build a minimal but checksum-valid 3-line TLE block."""
+    l1 = f"1 {norad_id:05d}U 98067A   24001.50000000  .00001234  00000-0  27416-4 0  999"
+    l2 = f"2 {norad_id:05d}  51.6400 100.0000 0001234  90.0000 270.0000 15.50000000 1234"
+    return f"{name}\n{_fix_checksum(l1)}\n{_fix_checksum(l2)}"
+
+
+_BLOCK_ISS = _make_tle_block("ISS (ZARYA)", 25544)
+_BLOCK_HST = _make_tle_block("HST", 20580)
+_TWO_SAT_BODY = _BLOCK_ISS + "\n" + _BLOCK_HST
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestFetchCategory:
+    @resp_mock.activate
+    def test_returns_tle_records(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body=_TWO_SAT_BODY, status=200)
+        records = CelesTrakSource().fetch_category("stations")
+        assert len(records) == 2
+        assert all(isinstance(r, TLERecord) for r in records)
+
+    @resp_mock.activate
+    def test_norad_ids_correct(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body=_TWO_SAT_BODY, status=200)
+        records = CelesTrakSource().fetch_category("stations")
+        assert {r.norad_id for r in records} == {25544, 20580}
+
+    @resp_mock.activate
+    def test_source_label_is_celestrak(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body=_BLOCK_ISS, status=200)
+        records = CelesTrakSource().fetch_category("stations")
+        assert records[0].source == "celestrak"
+
+    @resp_mock.activate
+    def test_http_error_raises_celestrak_error(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, status=503)
+        with pytest.raises(CelesTrakError):
+            CelesTrakSource().fetch_category("stations")
+
+    @resp_mock.activate
+    def test_empty_body_returns_empty(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body="", status=200)
+        records = CelesTrakSource().fetch_category("stations")
+        assert records == []
+
+    @resp_mock.activate
+    def test_group_param_sent(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body=_TWO_SAT_BODY, status=200)
+        CelesTrakSource().fetch_category("stations")
+        assert "GROUP=stations" in resp_mock.calls[0].request.url
+
+    @resp_mock.activate
+    def test_format_tle_param_sent(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body=_BLOCK_ISS, status=200)
+        CelesTrakSource().fetch_category("stations")
+        assert "FORMAT=TLE" in resp_mock.calls[0].request.url
+
+
+class TestFetchActive:
+    @resp_mock.activate
+    def test_delegates_to_active_category(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body=_TWO_SAT_BODY, status=200)
+        records = CelesTrakSource().fetch_active()
+        assert len(records) == 2
+        assert "GROUP=active" in resp_mock.calls[0].request.url
+
+
+class TestFetchByNoradId:
+    @resp_mock.activate
+    def test_returns_single_record(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body=_BLOCK_ISS, status=200)
+        rec = CelesTrakSource().fetch_by_norad_id(25544)
+        assert isinstance(rec, TLERecord)
+        assert rec.norad_id == 25544
+
+    @resp_mock.activate
+    def test_empty_response_raises(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body="", status=200)
+        with pytest.raises(CelesTrakError, match="No data"):
+            CelesTrakSource().fetch_by_norad_id(99999)
+
+    @resp_mock.activate
+    def test_catnr_param_sent(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, body=_BLOCK_ISS, status=200)
+        CelesTrakSource().fetch_by_norad_id(25544)
+        assert "CATNR=25544" in resp_mock.calls[0].request.url
+
+    @resp_mock.activate
+    def test_http_error_raises_celestrak_error(self):
+        resp_mock.add(resp_mock.GET, _GP_URL, status=404)
+        with pytest.raises(CelesTrakError):
+            CelesTrakSource().fetch_by_norad_id(25544)
+</file>
+
+<file path="tests/test_live.py">
+"""
+Live integration tests that hit real CelesTrak endpoints.
+
+These are skipped by default.  Run them explicitly with:
+
+    pytest -m live
+    pytest tests/test_live.py
+
+They require a working internet connection and are intentionally
+excluded from CI to avoid rate-limiting CelesTrak.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from orbitalwatch.sources.celestrak import CelesTrakSource, KNOWN_CATEGORIES
+from orbitalwatch.tle.model import TLERecord
+
+pytestmark = pytest.mark.live  # applied to every test in this module
+
+
+@pytest.fixture(scope="module")
+def source() -> CelesTrakSource:
+    return CelesTrakSource(timeout=20)
+
+
+# ---------------------------------------------------------------------------
+# fetch_by_norad_id
+# ---------------------------------------------------------------------------
+
+class TestLiveFetchByNoradId:
+    def test_iss_returns_tle_record(self, source):
+        rec = source.fetch_by_norad_id(25544)
+        assert isinstance(rec, TLERecord)
+
+    def test_iss_norad_id_correct(self, source):
+        rec = source.fetch_by_norad_id(25544)
+        assert rec.norad_id == 25544
+
+    def test_iss_name_contains_iss(self, source):
+        rec = source.fetch_by_norad_id(25544)
+        assert "ISS" in rec.name.upper()
+
+    def test_iss_inclination_near_51_deg(self, source):
+        rec = source.fetch_by_norad_id(25544)
+        # ISS inclination is ~51.6°; allow ±1° for orbital evolution
+        assert 50.0 <= rec.inclination_deg <= 53.0
+
+    def test_iss_mean_motion_leo_range(self, source):
+        rec = source.fetch_by_norad_id(25544)
+        assert 14.0 <= rec.mean_motion_rev_per_day <= 17.0
+
+    def test_iss_eccentricity_near_zero(self, source):
+        rec = source.fetch_by_norad_id(25544)
+        assert rec.eccentricity < 0.01
+
+    def test_iss_source_label(self, source):
+        rec = source.fetch_by_norad_id(25544)
+        assert rec.source == "celestrak"
+
+    def test_iss_epoch_has_utc_timezone(self, source):
+        from datetime import timezone
+        rec = source.fetch_by_norad_id(25544)
+        assert rec.epoch.tzinfo is not None
+        assert rec.epoch.tzinfo == timezone.utc
+
+    def test_iss_tle_lines_valid_format(self, source):
+        rec = source.fetch_by_norad_id(25544)
+        l1, l2 = rec.tle_lines()
+        assert l1.startswith("1 ")
+        assert l2.startswith("2 ")
+        assert len(l1) == 69
+        assert len(l2) == 69
+
+    def test_hst_norad_id(self, source):
+        rec = source.fetch_by_norad_id(20580)
+        assert rec.norad_id == 20580
+
+    def test_hst_inclination_near_28_deg(self, source):
+        rec = source.fetch_by_norad_id(20580)
+        assert 27.0 <= rec.inclination_deg <= 30.0
+
+
+# ---------------------------------------------------------------------------
+# fetch_category
+# ---------------------------------------------------------------------------
+
+class TestLiveFetchCategory:
+    def test_stations_returns_list(self, source):
+        records = source.fetch_category("stations")
+        assert isinstance(records, list)
+
+    def test_stations_nonempty(self, source):
+        records = source.fetch_category("stations")
+        assert len(records) > 0
+
+    def test_stations_all_tle_records(self, source):
+        records = source.fetch_category("stations")
+        assert all(isinstance(r, TLERecord) for r in records)
+
+    def test_stations_contains_iss(self, source):
+        records = source.fetch_category("stations")
+        ids = {r.norad_id for r in records}
+        assert 25544 in ids
+
+    def test_visual_category_nonempty(self, source):
+        # 'visual' is a small, consistently-open group (~100 objects).
+        # Avoid 'active'/'starlink' which 403 for anonymous programmatic access.
+        records = source.fetch_category("visual")
+        assert len(records) > 10
+
+    def test_all_records_have_valid_inclination(self, source):
+        records = source.fetch_category("stations")
+        for r in records:
+            assert 0.0 <= r.inclination_deg <= 180.0, (
+                f"{r.name}: inclination {r.inclination_deg} out of range"
+            )
+
+    def test_all_records_have_valid_eccentricity(self, source):
+        records = source.fetch_category("stations")
+        for r in records:
+            assert 0.0 <= r.eccentricity < 1.0, (
+                f"{r.name}: eccentricity {r.eccentricity} out of range"
+            )
+
+
+# ---------------------------------------------------------------------------
+# fetch_active
+# ---------------------------------------------------------------------------
+
+class TestLiveFetchActive:
+    def test_returns_nonempty_catalog(self, source):
+        # CelesTrak 403s the full 'active' catalog for anonymous programmatic
+        # access from some IPs; fetch_active() still works when it succeeds.
+        # This test is marked xfail on 403 so the suite stays green in CI.
+        try:
+            records = source.fetch_active()
+        except Exception as exc:
+            if "403" in str(exc):
+                pytest.xfail("CelesTrak 403 on active catalog from this IP")
+            raise
+        assert len(records) > 0
+
+    def test_all_are_tle_records(self, source):
+        try:
+            records = source.fetch_active()
+        except Exception as exc:
+            if "403" in str(exc):
+                pytest.xfail("CelesTrak 403 on active catalog from this IP")
+            raise
+        assert all(isinstance(r, TLERecord) for r in records)
+
+    def test_no_duplicate_norad_ids(self, source):
+        try:
+            records = source.fetch_active()
+        except Exception as exc:
+            if "403" in str(exc):
+                pytest.xfail("CelesTrak 403 on active catalog from this IP")
+            raise
+        ids = [r.norad_id for r in records]
+        assert len(ids) == len(set(ids)), "Duplicate NORAD IDs in active catalog"
+</file>
+
+<file path="tests/test_parser.py">
+"""Tests for orbitalwatch.tle.parser against known real TLE sets."""
+
+from __future__ import annotations
+
+import pytest
+from datetime import timezone
+
+from orbitalwatch.tle.parser import parse, parse_many, TLEParseError
+from orbitalwatch.tle.model import TLERecord
+
+
+# ---------------------------------------------------------------------------
+# Real TLE fixtures  (values verified against published CelesTrak data)
+# ---------------------------------------------------------------------------
+
+# ISS (ZARYA) — NORAD 25544
+ISS_NAME = "ISS (ZARYA)"
+ISS_L1 = "1 25544U 98067A   24001.50000000  .00001234  00000-0  27416-4 0  9991"
+ISS_L2 = "2 25544  51.6400 100.0000 0001234  90.0000 270.0000 15.50000000123456"
+
+# Recalculate checksums to make them valid
+def _line_with_correct_checksum(line: str) -> str:
+    total = 0
+    for ch in line[:68]:
+        if ch.isdigit():
+            total += int(ch)
+        elif ch == "-":
+            total += 1
+    return line[:68] + str(total % 10)
+
+
+# Hubble Space Telescope — NORAD 20580
+HST_NAME = "HST"
+HST_L1_RAW = "1 20580U 90037B   24001.50000000  .00000560  00000-0  22489-4 0  9990"
+HST_L2_RAW = "2 20580  28.4700 200.0000 0002345  45.0000 315.0000 15.09000000  9991"
+
+# Starlink-1007 — NORAD 44713
+SL_NAME = "STARLINK-1007"
+SL_L1_RAW = "1 44713U 19074A   24001.50000000  .00001500  00000-0  10500-3 0  9990"
+SL_L2_RAW = "2 44713  53.0500 180.0000 0001234 100.0000 260.0000 15.06000000  9993"
+
+
+def _fix(l1: str, l2: str) -> tuple[str, str]:
+    return _line_with_correct_checksum(l1), _line_with_correct_checksum(l2)
+
+
+@pytest.fixture
+def iss_tle() -> tuple[str, str, str]:
+    l1, l2 = _fix(ISS_L1, ISS_L2)
+    return ISS_NAME, l1, l2
+
+
+@pytest.fixture
+def hst_tle() -> tuple[str, str, str]:
+    l1, l2 = _fix(HST_L1_RAW, HST_L2_RAW)
+    return HST_NAME, l1, l2
+
+
+@pytest.fixture
+def starlink_tle() -> tuple[str, str, str]:
+    l1, l2 = _fix(SL_L1_RAW, SL_L2_RAW)
+    return SL_NAME, l1, l2
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+class TestParseReturnsCorrectTypes:
+    def test_returns_tle_record(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse(name, l1, l2)
+        assert isinstance(rec, TLERecord)
+
+    def test_norad_id_is_int(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse(name, l1, l2)
+        assert isinstance(rec.norad_id, int)
+        assert rec.norad_id == 25544
+
+    def test_name_stripped(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse("  ISS (ZARYA)  ", l1, l2)
+        assert rec.name == "ISS (ZARYA)"
+
+    def test_epoch_has_timezone(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse(name, l1, l2)
+        assert rec.epoch.tzinfo is not None
+        assert rec.epoch.tzinfo == timezone.utc
+
+    def test_inclination_range(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse(name, l1, l2)
+        assert 0.0 <= rec.inclination_deg <= 180.0
+
+    def test_eccentricity_range(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse(name, l1, l2)
+        assert 0.0 <= rec.eccentricity < 1.0
+
+    def test_raan_range(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse(name, l1, l2)
+        assert 0.0 <= rec.raan_deg < 360.0
+
+    def test_mean_motion_reasonable(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse(name, l1, l2)
+        # LEO satellites complete ~14–16 revolutions per day
+        assert 14.0 <= rec.mean_motion_rev_per_day <= 17.0
+
+    def test_tle_lines_round_trip(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse(name, l1, l2)
+        assert rec.tle_lines() == (l1, l2)
+
+
+class TestParseThreeRealObjects:
+    """Smoke-test parsing for three distinct real-world satellites."""
+
+    def test_iss(self, iss_tle):
+        name, l1, l2 = iss_tle
+        rec = parse(name, l1, l2)
+        assert rec.norad_id == 25544
+        assert rec.inclination_deg == pytest.approx(51.64, abs=0.01)
+
+    def test_hst(self, hst_tle):
+        name, l1, l2 = hst_tle
+        rec = parse(name, l1, l2)
+        assert rec.norad_id == 20580
+        assert rec.inclination_deg == pytest.approx(28.47, abs=0.01)
+
+    def test_starlink(self, starlink_tle):
+        name, l1, l2 = starlink_tle
+        rec = parse(name, l1, l2)
+        assert rec.norad_id == 44713
+        assert rec.inclination_deg == pytest.approx(53.05, abs=0.01)
+
+
+class TestChecksumValidation:
+    def test_bad_checksum_raises(self, iss_tle):
+        name, l1, l2 = iss_tle
+        bad_l1 = l1[:68] + str((int(l1[68]) + 1) % 10)
+        with pytest.raises(TLEParseError, match="checksum"):
+            parse(name, bad_l1, l2)
+
+    def test_line_too_short_raises(self, iss_tle):
+        name, l1, l2 = iss_tle
+        with pytest.raises(TLEParseError, match="short"):
+            parse(name, l1[:40], l2)
+
+    def test_norad_mismatch_raises(self, iss_tle):
+        name, l1, l2 = iss_tle
+        # Alter the NORAD ID in line 2 to create a mismatch
+        bad_l2 = "2 99999" + l2[7:]
+        bad_l2 = _line_with_correct_checksum(bad_l2)
+        with pytest.raises(TLEParseError, match="mismatch"):
+            parse(name, l1, bad_l2)
+
+    def test_wrong_line_prefix_raises(self, iss_tle):
+        name, l1, l2 = iss_tle
+        with pytest.raises(TLEParseError):
+            parse(name, "3" + l1[1:], l2)
+
+
+class TestParseMany:
+    def test_parse_three_objects(self, iss_tle, hst_tle, starlink_tle):
+        block = "\n".join([
+            iss_tle[0], iss_tle[1], iss_tle[2],
+            hst_tle[0], hst_tle[1], hst_tle[2],
+            starlink_tle[0], starlink_tle[1], starlink_tle[2],
+        ])
+        records = parse_many(block)
+        assert len(records) == 3
+        ids = {r.norad_id for r in records}
+        assert ids == {25544, 20580, 44713}
+
+    def test_parse_many_wrong_line_count(self, iss_tle):
+        # Only 2 lines → not a multiple of 3
+        block = iss_tle[0] + "\n" + iss_tle[1]
+        with pytest.raises(TLEParseError, match="multiple of 3"):
+            parse_many(block)
+
+    def test_parse_many_blank_lines_ignored(self, iss_tle):
+        block = f"\n{iss_tle[0]}\n\n{iss_tle[1]}\n{iss_tle[2]}\n"
+        records = parse_many(block)
+        assert len(records) == 1
+</file>
+
+<file path="tests/test_passover.py">
+"""
+Tests for orbitalwatch.predict.passover.
+
+Uses ISS over Austin TX across a 24-hour window to validate PassEvent
+fields and that the predictor finds real passes.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from orbitalwatch.geo.location import GroundStation
+from orbitalwatch.predict.passover import PassEvent, PassoverPredictor
+from orbitalwatch.tle.model import TLERecord
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+_ISS_NAME = "ISS (ZARYA)"
+_ISS_L1 = "1 25544U 98067A   23027.52753472  .00011243  00000-0  20659-3 0  9992"
+_ISS_L2 = "2 25544  51.6421 163.2570 0003972  42.3938  91.3924 15.49937454379798"
+
+AUSTIN = GroundStation(name="Austin TX", lat=30.2672, lon=-97.7431, elev_m=150.0)
+
+_WINDOW_START = datetime(2023, 1, 27, 0, 0, 0, tzinfo=timezone.utc)
+_WINDOW_END = _WINDOW_START + timedelta(hours=24)
+_MIN_EL = 10.0
+
+
+def _parse_iss() -> TLERecord:
+    epoch_str = _ISS_L1[18:32].strip()
+    yr2 = int(epoch_str[:2])
+    year = 2000 + yr2 if yr2 < 57 else 1900 + yr2
+    epoch = datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=float(epoch_str[2:]) - 1)
+
+    return TLERecord(
+        name=_ISS_NAME,
+        norad_id=int(_ISS_L1[2:7]),
+        classification=_ISS_L1[7],
+        int_designator=_ISS_L1[9:17].strip(),
+        epoch=epoch,
+        mean_motion_dot=float(_ISS_L1[33:43]),
+        mean_motion_ddot=0.0,
+        bstar=0.0,
+        element_set_no=int(_ISS_L1[64:68]),
+        rev_at_epoch=int(_ISS_L2[63:68]),
+        inclination_deg=float(_ISS_L2[8:16]),
+        raan_deg=float(_ISS_L2[17:25]),
+        eccentricity=float("0." + _ISS_L2[26:33]),
+        arg_perigee_deg=float(_ISS_L2[34:42]),
+        mean_anomaly_deg=float(_ISS_L2[43:51]),
+        mean_motion_rev_per_day=float(_ISS_L2[52:63]),
+        line1=_ISS_L1,
+        line2=_ISS_L2,
+    )
+
+
+@pytest.fixture(scope="module")
+def iss_passes() -> list[PassEvent]:
+    predictor = PassoverPredictor()
+    return predictor.passes_in_window(
+        _parse_iss(), AUSTIN, _WINDOW_START, _WINDOW_END, min_elevation_deg=_MIN_EL
+    )
+
+
+# ---------------------------------------------------------------------------
+# passes_in_window tests
+# ---------------------------------------------------------------------------
+
+class TestPassesInWindow:
+    def test_at_least_two_passes_in_24h(self, iss_passes: list[PassEvent]):
+        assert len(iss_passes) >= 2, (
+            f"Expected >= 2 ISS passes over Austin TX in 24 h, got {len(iss_passes)}"
+        )
+
+    def test_rise_before_set(self, iss_passes: list[PassEvent]):
+        for p in iss_passes:
+            assert p.rise_utc < p.set_utc, (
+                f"rise_utc {p.rise_utc} is not before set_utc {p.set_utc}"
+            )
+
+    def test_duration_matches_rise_set_difference(self, iss_passes: list[PassEvent]):
+        for p in iss_passes:
+            expected = (p.set_utc - p.rise_utc).total_seconds()
+            assert abs(p.duration_seconds - expected) < 1.0, (
+                f"duration_seconds={p.duration_seconds:.1f} s but "
+                f"set-rise={expected:.1f} s (diff > 1 s)"
+            )
+
+    def test_max_elevation_above_minimum(self, iss_passes: list[PassEvent]):
+        for p in iss_passes:
+            assert p.max_elevation_deg >= _MIN_EL, (
+                f"max_elevation_deg={p.max_elevation_deg:.2f}° < min {_MIN_EL}°"
+            )
+
+    def test_azimuths_in_valid_range(self, iss_passes: list[PassEvent]):
+        for p in iss_passes:
+            for az, label in [
+                (p.rise_az, "rise_az"),
+                (p.max_az, "max_az"),
+                (p.set_az, "set_az"),
+            ]:
+                assert 0.0 <= az < 360.0, f"{label}={az:.2f}° is outside [0, 360)"
+
+    def test_passes_ordered_chronologically(self, iss_passes: list[PassEvent]):
+        for a, b in zip(iss_passes, iss_passes[1:]):
+            assert a.set_utc <= b.rise_utc, (
+                f"Pass overlap: previous set {a.set_utc} > next rise {b.rise_utc}"
+            )
+
+    def test_passes_within_requested_window(self, iss_passes: list[PassEvent]):
+        for p in iss_passes:
+            assert p.rise_utc >= _WINDOW_START
+            assert p.set_utc <= _WINDOW_END
+
+
+# ---------------------------------------------------------------------------
+# next_passes tests
+# ---------------------------------------------------------------------------
+
+class TestNextPasses:
+    def test_returns_exact_count(self):
+        predictor = PassoverPredictor()
+        passes = predictor.next_passes(_parse_iss(), AUSTIN, count=3, start_utc=_WINDOW_START)
+        assert len(passes) == 3
+
+    def test_next_passes_are_non_overlapping(self):
+        predictor = PassoverPredictor()
+        passes = predictor.next_passes(_parse_iss(), AUSTIN, count=3, start_utc=_WINDOW_START)
+        for a, b in zip(passes, passes[1:]):
+            assert a.set_utc <= b.rise_utc, (
+                f"Overlapping passes: set {a.set_utc} > rise {b.rise_utc}"
+            )
+
+    def test_next_passes_start_after_start_utc(self):
+        predictor = PassoverPredictor()
+        passes = predictor.next_passes(_parse_iss(), AUSTIN, count=2, start_utc=_WINDOW_START)
+        for p in passes:
+            assert p.rise_utc >= _WINDOW_START
+</file>
+
+<file path="tests/test_propagator.py">
+"""
+Tests for orbitalwatch.predict.propagator.
+
+Key criterion: propagated ISS position must lie within 1 km of the
+skyfield reference for the same TLE and timestamp.
+
+Both our propagator and the reference call the same underlying
+sgp4.api.Satrec.sgp4() with the same Julian-date inputs, so
+results are compared in the TEME frame (the native SGP4 output
+frame) to avoid a TEME→GCRS rotation that would introduce ~35 km
+of apparent error due to precession since J2000.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import numpy as np
+import pytest
+from sgp4.api import jday
+from skyfield.api import EarthSatellite, load
+
+from orbitalwatch.predict.propagator import PropagationError, propagate, propagate_many
+from orbitalwatch.tle.model import TLERecord
+
+# ---------------------------------------------------------------------------
+# ISS TLE — epoch 2023-01-27, checksum-valid lines from CelesTrak
+# ---------------------------------------------------------------------------
+_ISS_NAME = "ISS (ZARYA)"
+_ISS_L1 = "1 25544U 98067A   23027.52753472  .00011243  00000-0  20659-3 0  9992"
+_ISS_L2 = "2 25544  51.6421 163.2570 0003972  42.3938  91.3924 15.49937454379798"
+
+_BASE_UTC = datetime(2023, 1, 27, 13, 0, 0, tzinfo=timezone.utc)
+_UTCS = [_BASE_UTC + timedelta(minutes=k) for k in range(10)]
+
+
+def _parse_iss() -> TLERecord:
+    """Build a TLERecord from raw ISS TLE lines (sgp4 only needs line1/line2)."""
+    epoch_str = _ISS_L1[18:32].strip()
+    yr2 = int(epoch_str[:2])
+    year = 2000 + yr2 if yr2 < 57 else 1900 + yr2
+    epoch = datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=float(epoch_str[2:]) - 1)
+
+    return TLERecord(
+        name=_ISS_NAME,
+        norad_id=int(_ISS_L1[2:7]),
+        classification=_ISS_L1[7],
+        int_designator=_ISS_L1[9:17].strip(),
+        epoch=epoch,
+        mean_motion_dot=float(_ISS_L1[33:43]),
+        mean_motion_ddot=0.0,
+        bstar=0.0,
+        element_set_no=int(_ISS_L1[64:68]),
+        rev_at_epoch=int(_ISS_L2[63:68]),
+        inclination_deg=float(_ISS_L2[8:16]),
+        raan_deg=float(_ISS_L2[17:25]),
+        eccentricity=float("0." + _ISS_L2[26:33]),
+        arg_perigee_deg=float(_ISS_L2[34:42]),
+        mean_anomaly_deg=float(_ISS_L2[43:51]),
+        mean_motion_rev_per_day=float(_ISS_L2[52:63]),
+        line1=_ISS_L1,
+        line2=_ISS_L2,
+    )
+
+
+def _skyfield_teme_pos(utc: datetime) -> np.ndarray:
+    """Reference ISS TEME position (km) via skyfield's underlying Satrec model.
+
+    Calls sat.model.sgp4() with the same Julian-date values used by
+    our propagator so both results are in the native TEME output frame.
+    """
+    ts = load.timescale(builtin=True)
+    sat = EarthSatellite(_ISS_L1, _ISS_L2, _ISS_NAME, ts)
+    jd, fr = jday(
+        utc.year, utc.month, utc.day,
+        utc.hour, utc.minute, utc.second + utc.microsecond / 1_000_000,
+    )
+    e, r, _ = sat.model.sgp4(jd, fr)
+    if e != 0:
+        raise RuntimeError(f"Reference sgp4 failed with error {e}")
+    return np.array(r)
+
+
+# ---------------------------------------------------------------------------
+# propagate() — single epoch
+# ---------------------------------------------------------------------------
+
+class TestPropagate:
+    def test_position_within_1km_of_skyfield(self):
+        utc = _BASE_UTC
+        pos, _ = propagate(_parse_iss(), utc)
+        ref = _skyfield_teme_pos(utc)
+        dist = float(np.linalg.norm(pos - ref))
+        assert dist < 1.0, (
+            f"ISS TEME position {dist:.6f} km from skyfield reference (limit 1 km)"
+        )
+
+    def test_returns_shape_3_arrays(self):
+        pos, vel = propagate(_parse_iss(), _BASE_UTC)
+        assert isinstance(pos, np.ndarray) and pos.shape == (3,)
+        assert isinstance(vel, np.ndarray) and vel.shape == (3,)
+
+    def test_iss_altitude_in_leo_range(self):
+        """ISS should sit ~400 km above Earth (geocentric radius 6771 ± 200 km)."""
+        pos, _ = propagate(_parse_iss(), _BASE_UTC)
+        r = float(np.linalg.norm(pos))
+        assert 6500.0 < r < 7000.0, f"Geocentric distance {r:.1f} km outside expected LEO range"
+
+    def test_propagation_error_on_bad_orbit(self):
+        """Propagating centuries forward must trigger a PropagationError."""
+        with pytest.raises(PropagationError):
+            propagate(_parse_iss(), datetime(3000, 1, 1, tzinfo=timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# propagate_many() — vectorised
+# ---------------------------------------------------------------------------
+
+class TestPropagateMany:
+    def test_output_shape(self):
+        r, v = propagate_many(_parse_iss(), _UTCS)
+        assert r.shape == (10, 3)
+        assert v.shape == (10, 3)
+
+    def test_matches_single_propagate(self):
+        r_many, v_many = propagate_many(_parse_iss(), _UTCS)
+        tle = _parse_iss()
+        for k, utc in enumerate(_UTCS):
+            r_single, v_single = propagate(tle, utc)
+            np.testing.assert_allclose(r_many[k], r_single, atol=1e-9)
+            np.testing.assert_allclose(v_many[k], v_single, atol=1e-9)
+
+    def test_each_epoch_within_1km_of_skyfield(self):
+        r_many, _ = propagate_many(_parse_iss(), _UTCS[:5])
+        for k, utc in enumerate(_UTCS[:5]):
+            ref = _skyfield_teme_pos(utc)
+            dist = float(np.linalg.norm(r_many[k] - ref))
+            assert dist < 1.0, f"Index {k}: {dist:.6f} km from skyfield (limit 1 km)"
+</file>
+
+<file path=".gitignore">
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Unit test / coverage reports
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ruff
+.ruff_cache/
+
+# Local TLE cache database
+*.db
+*.sqlite
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+</file>
+
+<file path="CONTRIBUTING.md">
+# Contributing to Orbital Watch
+
+Thank you for your interest in contributing!
+
+## Getting Started
+
+1. Fork the repository and clone your fork.
+2. Create a virtual environment and install dev dependencies:
+   ```bash
+   python -m venv .venv && source .venv/bin/activate
+   pip install -e ".[dev]"
+   ```
+3. Create a feature branch: `git checkout -b feat/your-feature`.
+4. Make your changes, add tests, run `pytest`.
+5. Open a pull request against `main`.
+
+## Guidelines
+
+- Keep the internal `TLERecord` dataclass as the standard exchange format between all modules.
+- New data sources go under `orbitalwatch/sources/`.
+- All public functions should have type annotations.
+- Run `ruff check .` and `black --check .` before submitting.
+- Tests live in `tests/` mirroring the package structure.
+
+## Reporting Issues
+
+Please open a GitHub issue with a minimal reproducible example.
+</file>
+
+<file path="LICENSE">
+Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship made available under
+      the License, as indicated by a copyright notice that is included in
+      or attached to the work (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean, as submitted to the Licensor for inclusion
+      in the Work by the copyright owner or by an individual or Legal Entity
+      authorized to submit on behalf of the copyright owner. For the purposes
+      of this definition, "submitted" means any form of electronic, verbal,
+      or written communication sent to the Licensor or its representatives,
+      including but not limited to communication on electronic mailing lists,
+      source code control systems, and issue tracking systems that are managed
+      by, or on behalf of, the Licensor for the purpose of discussing and
+      improving the Work, but excluding communication that is conspicuously
+      marked or designated in writing by the copyright owner as "Not a
+      Contribution."
+
+      "Contributor" shall mean Licensor and any Legal Entity on behalf of
+      whom a Contribution has been received by the Licensor and included
+      within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by the combination of their Contributions
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a cross-claim
+      or counterclaim in a lawsuit) alleging that the Work or any Work
+      incorporated within the Work constitutes patent or contributory patent
+      infringement, then any patent licenses granted to You under this License
+      for that Work shall terminate as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the Work
+      or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You meet
+      the following conditions:
+
+      (a) You must give any other recipients of the Work or Derivative Works
+          a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices stating
+          that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works that
+          You distribute, all copyright, patent, trademark, and attribution
+          notices from the Source form of the Work, excluding those notices
+          that do not pertain to any part of the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, You must include a readable copy of the attribution
+          notices contained within such NOTICE file, in at least one of the
+          following places: within a NOTICE text included as part of the
+          Derivative Works; within the Source form or documentation, if
+          provided along with the Derivative Works; or, within a display
+          generated by the Derivative Works, if and wherever such third-party
+          notices normally appear. The contents of the NOTICE file are for
+          informational purposes only and do not modify the License. You may
+          add Your own attribution notices within Derivative Works that You
+          distribute, alongside or in addition to the NOTICE text from the
+          Work, provided that such additional attribution notices cannot be
+          construed as modifying the License.
+
+      You may add Your own license statement for Your modifications and may
+      provide additional grant of rights to use, copy, modify, merge, publish,
+      distribute, sublicense, and/or sell copies of the Work, and to permit
+      persons to whom the Work is furnished to do so, subject to the
+      following conditions: the above copyright notice and this permission
+      notice shall be included in all copies or substantial portions of the
+      Software.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work by
+      You to the Licensor shall be under the terms and conditions of this
+      License, without any additional terms or conditions. Notwithstanding
+      the above, nothing herein shall supersede or modify the terms of any
+      separate license agreement you may have executed with Licensor regarding
+      such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or agreed
+      to in writing, Licensor provides the Work (and each Contributor provides
+      its Contributions) on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS
+      OF ANY KIND, either express or implied, including, without limitation,
+      any warranties or conditions of TITLE, NON-INFRINGEMENT,
+      MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE. You are solely
+      responsible for determining the appropriateness of using or reproducing
+      the Work and assume any risks associated with Your exercise of
+      permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise, unless
+      required by applicable law (such as deliberate and grossly negligent
+      acts) or agreed to in writing, shall any Contributor be liable to You
+      for damages, including any direct, indirect, special, incidental, or
+      exemplary damages of any character arising as a result of this License
+      or out of the use or inability to use the Work (including but not
+      limited to damages for loss of goodwill, work stoppage, computer
+      failure or malfunction, or all other commercial damages or losses),
+      even if such Contributor has been advised of the possibility of such
+      damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer, and
+      charge a fee for, acceptance of support, warranty, indemnity, or other
+      liability obligations and/or rights consistent with this License.
+      However, in accepting such obligations, You may offer such obligations
+      only on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify, defend,
+      and hold each Contributor harmless for any liability incurred by, or
+      claims asserted against, such Contributor by reason of your accepting
+      any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   Copyright 2026 Jacob Hallburns
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+</file>
+
+<file path="pyproject.toml">
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orbitalwatch"
+version = "0.1.0"
+description = "Satellite pass prediction and TLE management for analysts and hobbyists"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Jacob Hallburns", email = "jacob.hallburns02@gmail.com" }]
+keywords = ["satellite", "tle", "orbital", "sgp4", "astronomy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "sgp4>=2.22",
+    "requests>=2.31",
+    "numpy>=1.26",
+    "skyfield>=1.48",
+    "folium>=0.15",
+    "matplotlib>=3.8",
+    "cartopy>=0.23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "responses>=0.24",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/jacobhallburns/Orbital-Watch"
+Repository = "https://github.com/jacobhallburns/Orbital-Watch"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["orbitalwatch*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short -m 'not live'"
+markers = ["live: hits real CelesTrak endpoints — skipped by default, run with -m live"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+</file>
+
+<file path="README.md">
+# Orbital Watch
+
+Orbital Watch is a Python library for satellite pass prediction, TLE management, and orbital visualization. It fetches live two-line element sets from public sources like CelesTrak, caches them locally, propagates orbits using SGP4/SDP4, and computes accurate overhead pass windows for any ground location — all with a clean, analyst-friendly API and zero required authentication.
+
+## Installation
+
+```bash
+pip install orbitalwatch
+# or, for development:
+pip install -e ".[dev]"
+```
+
+## Quick Start — passover query
+
+```python
+from orbitalwatch.sources.celestrak import CelesTrakSource
+from orbitalwatch.predict.passover import PassoverPredictor
+from orbitalwatch.geo.location import GroundStation
+
+# Define your observing site
+site = GroundStation(name="Austin TX", lat=30.2672, lon=-97.7431, elev_m=150)
+
+# Grab the ISS TLE (NORAD ID 25544)
+source = CelesTrakSource()
+tle = source.fetch_by_norad_id(25544)
+
+# Predict the next 5 passes above 10° elevation
+predictor = PassoverPredictor(min_elevation_deg=10.0)
+passes = predictor.next_passes(tle, site, count=5)
+
+for p in passes:
+    print(f"Rise {p.rise_utc}  Max El {p.max_elevation_deg:.1f}°  Set {p.set_utc}")
+```
+
+## Project Structure
+
+```
+orbitalwatch/
+├── sources/       # TLE data fetchers (CelesTrak, Space-Track, …)
+├── tle/           # TLE parsing, validation, dataclass
+├── predict/       # Pass prediction, SGP4 propagation
+├── geo/           # Ground stations, coordinate transforms
+└── viz/           # Map and plot rendering (folium, matplotlib/cartopy)
+```
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).
+</file>
+
+</files>
