@@ -22,6 +22,7 @@ import logging
 
 import requests
 
+from orbitalwatch.sources.base import BaseSource, SourceFetchError
 from orbitalwatch.tle.model import TLERecord
 from orbitalwatch.tle.parser import TLEParseError, parse_many
 
@@ -73,11 +74,11 @@ KNOWN_CATEGORIES: tuple[str, ...] = (
 _SOURCE_LABEL = "celestrak"
 
 
-class CelesTrakError(RuntimeError):
+class CelesTrakError(SourceFetchError):
     """Raised when a CelesTrak request fails and no cached fallback is available."""
 
 
-class CelesTrakSource:
+class CelesTrakSource(BaseSource):
     """Fetch satellite TLEs from CelesTrak's public API.
 
     Uses ``FORMAT=TLE`` (classic 3-line TLE text), which is the most
@@ -92,6 +93,10 @@ class CelesTrakSource:
         self.timeout = timeout
         self._session = session or requests.Session()
         self._session.headers.update({"User-Agent": "orbitalwatch/0.1 (python)"})
+
+    @property
+    def name(self) -> str:
+        return _SOURCE_LABEL
 
     # ------------------------------------------------------------------
     # Public API
@@ -143,6 +148,29 @@ class CelesTrakSource:
                 "NORAD ID %d matched %d records; returning first", norad_id, len(records)
             )
         return records[0]
+
+    def fetch_many(self, norad_ids: list[int]) -> list[TLERecord]:
+        """Fetch multiple satellites by NORAD ID.
+
+        Loops over ``fetch_by_norad_id``; individual misses are logged and
+        skipped rather than raising.
+
+        Args:
+            norad_ids: List of integer NORAD IDs.
+
+        Returns:
+            List of TLERecord objects for IDs that were found.
+
+        Raises:
+            CelesTrakError: If a request itself fails (network error, HTTP error).
+        """
+        results: list[TLERecord] = []
+        for nid in norad_ids:
+            try:
+                results.append(self.fetch_by_norad_id(nid))
+            except CelesTrakError as exc:
+                logger.warning("Skipping NORAD %d: %s", nid, exc)
+        return results
 
     # ------------------------------------------------------------------
     # Internal helpers
